@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DevOps Demo App</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="card">
+    <h1>🚀 Deployed with Azure DevOps</h1>
+    <p class="sub">Repos → Pipelines → Artifacts → Environments</p>
+
+    <span class="badge env-{{ info.environment }}">{{ info.environment | upper }}</span>
+
+    <table>
+      <tr><th>Version</th><td>{{ info.version }}</td></tr>
+      <tr><th>Build ID</th><td>{{ info.build_id }}</td></tr>
+      <tr><th>Host</th><td>{{ info.host }}</td></tr>
+      <tr><th>Server time (UTC)</th><td>{{ info.time_utc }}</td></tr>
+    </table>
+
+    <p class="links">
+      <a href="/health">/health</a> · <a href="/api/info">/api/info</a>
+    </p>
+  </main>
+</body>
+</html>

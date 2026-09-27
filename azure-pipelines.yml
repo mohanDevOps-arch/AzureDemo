@@ -1,0 +1,135 @@
+# =====================================================================
+#  DevOps Demo App - end-to-end pipeline (zero cost: self-hosted agent)
+#  Build -> Test -> Package -> Publish to Azure Artifacts -> Dev -> Prod
+# =====================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    exclude:
+      - README.md
+      - docs/*
+
+# Pull-request builds for Azure Repos are switched on with a Branch Policy
+# (Build validation), not here.
+
+variables:
+  - group: demo-app-vars          # Library > Variable group (feedName, devPort, prodPort)
+  - name: isMain
+    value: $[eq(variables['Build.SourceBranch'], 'refs/heads/main')]
+  - name: packageVersion
+    value: 1.0.$(Build.BuildId)
+
+pool:
+  name: SelfHostedPool              # your self-hosted agent pool (free, unlimited minutes)
+
+stages:
+# ---------------------------------------------------------------------
+- stage: Build
+  displayName: 'Build & Test'
+  jobs:
+  - job: BuildJob
+    displayName: 'Install, test, package'
+    steps:
+    - checkout: self
+
+    - script: |
+        python3 -m venv .venv
+        .venv/bin/pip install -q --upgrade pip
+        .venv/bin/pip install -q -r requirements-dev.txt
+      displayName: 'Install dependencies'
+
+    - script: |
+        .venv/bin/pytest tests \
+          --junitxml=test-results.xml \
+          --cov=app --cov-report=xml:coverage.xml
+      displayName: 'Run unit tests'
+
+    - task: PublishTestResults@2
+      displayName: 'Publish test results'
+      condition: succeededOrFailed()
+      inputs:
+        testResultsFormat: JUnit
+        testResultsFiles: test-results.xml
+        testRunTitle: 'Unit tests'
+
+    - task: PublishCodeCoverageResults@2
+      displayName: 'Publish code coverage'
+      continueOnError: true           # optional report; never blocks the build
+      inputs:
+        summaryFileLocation: coverage.xml
+
+    - script: |
+        python3 -m zipfile -c "$(Build.ArtifactStagingDirectory)/app.zip" app requirements.txt scripts
+        ls -lh "$(Build.ArtifactStagingDirectory)"
+      displayName: 'Package app.zip'
+
+    - task: PublishPipelineArtifact@1
+      displayName: 'Publish pipeline artifact (drop)'
+      inputs:
+        targetPath: $(Build.ArtifactStagingDirectory)
+        artifact: drop
+
+# ---------------------------------------------------------------------
+- stage: PublishPackage
+  displayName: 'Publish to Azure Artifacts'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables.isMain, true))
+  jobs:
+  - job: Publish
+    steps:
+    - checkout: none
+    - download: current
+      artifact: drop
+
+    - task: UniversalPackages@0
+      displayName: 'Publish Universal Package'
+      inputs:
+        command: publish
+        publishDirectory: $(Pipeline.Workspace)/drop
+        feedsToUsePublish: internal
+        vstsFeedPublish: '$(System.TeamProject)/$(feedName)'
+        vstsFeedPackagePublish: devops-demo-app
+        versionOption: custom
+        versionPublish: $(packageVersion)
+        packagePublishDescription: 'Build $(Build.BuildNumber) from $(Build.SourceVersion)'
+
+# ---------------------------------------------------------------------
+- stage: DeployDev
+  displayName: 'Deploy to DEV'
+  dependsOn: PublishPackage
+  condition: succeeded()
+  jobs:
+  - deployment: DeployDev
+    displayName: 'Deploy DEV'
+    environment: dev
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: |
+              python3 -m zipfile -e "$(Pipeline.Workspace)/drop/app.zip" "$(Agent.TempDirectory)/pkg"
+              bash "$(Agent.TempDirectory)/pkg/scripts/deploy.sh" dev $(devPort) \
+                   "$(Pipeline.Workspace)/drop/app.zip" $(Build.BuildId)
+            displayName: 'Deploy & smoke test (dev)'
+
+# ---------------------------------------------------------------------
+- stage: DeployProd
+  displayName: 'Deploy to PROD'
+  dependsOn: DeployDev
+  condition: succeeded()
+  jobs:
+  - deployment: DeployProd
+    displayName: 'Deploy PROD'
+    environment: prod               # add an Approval check on this environment
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: |
+              python3 -m zipfile -e "$(Pipeline.Workspace)/drop/app.zip" "$(Agent.TempDirectory)/pkg"
+              bash "$(Agent.TempDirectory)/pkg/scripts/deploy.sh" prod $(prodPort) \
+                   "$(Pipeline.Workspace)/drop/app.zip" $(Build.BuildId)
+            displayName: 'Deploy & smoke test (prod)'
